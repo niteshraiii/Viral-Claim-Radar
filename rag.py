@@ -2,9 +2,9 @@ import os
 import zipfile
 
 import faiss
-import google.generativeai as genai
 import numpy as np
 from bs4 import BeautifulSoup
+from google import genai
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
@@ -117,8 +117,7 @@ def answer(query, chunks) -> str:
     if not chunks:
         raise ValueError("No retrieved chunks available to answer the question.")
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    client = genai.Client(api_key=api_key)
 
     prompt_lines = [
         "Answer the question using only the context below.",
@@ -131,5 +130,10 @@ def answer(query, chunks) -> str:
 
     prompt_lines.extend(["", f"Question: {query}"])
 
-    response = model.generate_content("\n".join(prompt_lines))
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents="\n".join(prompt_lines),
+    )
+    if not response.text:
+        raise ValueError("Gemini returned an empty response.")
     return response.text.strip()
