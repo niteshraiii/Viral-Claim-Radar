@@ -1,12 +1,45 @@
 import os
 import zipfile
+from urllib.parse import urlparse
 
-import faiss
-import numpy as np
 from bs4 import BeautifulSoup
 from google import genai
+from google.genai import types
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+
+
+def _uses_blocked_loopback_proxy() -> bool:
+    for key in PROXY_ENV_KEYS:
+        proxy_value = os.environ.get(key)
+        if not proxy_value:
+            continue
+
+        parsed = urlparse(proxy_value)
+        if parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 9:
+            return True
+
+    return False
+
+
+def _build_genai_client(api_key: str) -> genai.Client:
+    http_options = None
+
+    if _uses_blocked_loopback_proxy():
+        http_options = types.HttpOptions(clientArgs={"trust_env": False})
+
+    return genai.Client(api_key=api_key, http_options=http_options)
 
 
 def _html_to_text(content: bytes) -> str:
@@ -86,28 +119,23 @@ def build_index(chunks) -> tuple:
     if not chunks:
         raise ValueError("No text could be extracted from the uploaded file.")
 
-    model = SentenceTransformer("all-MiniLM-L6-v2")
     texts = [chunk["text"] for chunk in chunks]
-    embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-    embeddings = np.asarray(embeddings, dtype="float32")
+    vectorizer = TfidfVectorizer(stop_words="english")
+    matrix = vectorizer.fit_transform(texts)
 
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(embeddings)
-
-    return index, model, chunks
+    return matrix, vectorizer, chunks
 
 
 def retrieve(query, index, model, chunks, top_k=5) -> list[dict]:
     if not chunks:
         return []
 
-    query_embedding = model.encode([query], convert_to_numpy=True, show_progress_bar=False)
-    query_embedding = np.asarray(query_embedding, dtype="float32")
-
+    query_vector = model.transform([query])
+    similarities = cosine_similarity(query_vector, index)[0]
+    ranked_indices = similarities.argsort()[::-1]
     limit = min(top_k, len(chunks))
-    _, indices = index.search(query_embedding, limit)
 
-    return [chunks[index_id] for index_id in indices[0] if index_id != -1]
+    return [chunks[index_id] for index_id in ranked_indices[:limit] if similarities[index_id] > 0]
 
 
 def answer(query, chunks) -> str:
@@ -117,7 +145,7 @@ def answer(query, chunks) -> str:
     if not chunks:
         raise ValueError("No retrieved chunks available to answer the question.")
 
-    client = genai.Client(api_key=api_key)
+    client = _build_genai_client(api_key)
 
     prompt_lines = [
         "Answer the question using only the context below.",
@@ -130,10 +158,13 @@ def answer(query, chunks) -> str:
 
     prompt_lines.extend(["", f"Question: {query}"])
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents="\n".join(prompt_lines),
-    )
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="\n".join(prompt_lines),
+        )
+    except Exception as exc:
+        raise ValueError(f"Gemini request failed: {exc}") from exc
     if not response.text:
         raise ValueError("Gemini returned an empty response.")
     return response.text.strip()

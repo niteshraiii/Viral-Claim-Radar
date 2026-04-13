@@ -1,6 +1,5 @@
-streamlit
 pypdf
 beautifulsoup4
-sentence-transformers
-faiss-cpu
 google-genai
+flask
+scikit-learn

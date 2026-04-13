@@ -1,249 +1,282 @@
 import os
+import tomllib
+import zipfile
+from urllib.parse import urlparse
+from flask import Flask, jsonify, render_template, request, send_from_directory
+from bs4 import BeautifulSoup
+from google import genai
+from google.genai import types
+from pypdf import PdfReader
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-import streamlit as st
+BASE_DIR = os.path.dirname(__file__)
 
-from rag import answer, build_index, chunk_text, extract_text, retrieve
+app = Flask(__name__, template_folder="templates")
+
+# In-memory storage (good for hackathons)
+VECTOR_INDEX = None
+VECTORIZER = None
+CHUNKS = None
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
 
 
 def _load_api_key() -> None:
-    try:
-        secret_key = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        secret_key = None
+    if os.environ.get("GEMINI_API_KEY"):
+        return
+
+    secrets_path = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
+    if not os.path.exists(secrets_path):
+        return
+
+    with open(secrets_path, "rb") as secrets_file:
+        secret_key = tomllib.load(secrets_file).get("GEMINI_API_KEY")
 
     if secret_key:
         os.environ["GEMINI_API_KEY"] = secret_key
 
 
-def _reset_chat() -> None:
-    st.session_state["messages"] = []
+def _uses_blocked_loopback_proxy() -> bool:
+    for key in PROXY_ENV_KEYS:
+        proxy_value = os.environ.get(key)
+        if not proxy_value:
+            continue
+
+        parsed = urlparse(proxy_value)
+        if parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 9:
+            return True
+
+    return False
 
 
-def _inject_styles() -> None:
-    st.markdown(
-        """
-        <style>
-        .stApp {
-            background: linear-gradient(180deg, #f6f8fc 0%, #ffffff 22%);
-        }
-        [data-testid="stAppViewContainer"] > .main > div {
-            max-width: 900px;
-        }
-        [data-testid="stSidebar"] {
-            background: #f3f5f9;
-        }
-        .hero-card {
-            padding: 1.2rem 1.3rem;
-            border: 1px solid #d9e2f2;
-            border-radius: 18px;
-            background: linear-gradient(135deg, #ffffff 0%, #eef4ff 100%);
-            margin-bottom: 1rem;
-        }
-        .hero-card h1 {
-            margin: 0;
-            font-size: 1.8rem;
-            color: #18212f;
-        }
-        .hero-card p {
-            margin: 0.45rem 0 0 0;
-            color: #4b5b72;
-            line-height: 1.5;
-        }
-        .info-card {
-            padding: 0.9rem 1rem;
-            border: 1px solid #dde5f0;
-            border-radius: 14px;
-            background: #ffffff;
-            margin-bottom: 0.75rem;
-        }
-        .info-card strong {
-            color: #18212f;
-        }
-        .empty-state {
-            padding: 1.25rem 1.1rem;
-            border: 1px dashed #c8d4e8;
-            border-radius: 16px;
-            background: #ffffff;
-            color: #415068;
-            margin: 1rem 0 1.25rem 0;
-        }
-        .source-note {
-            color: #5e6f87;
-            font-size: 0.92rem;
-            margin-top: 0.25rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+def _build_genai_client(api_key: str) -> genai.Client:
+    http_options = None
+
+    # Some environments inject a dead loopback proxy at 127.0.0.1:9, which
+    # causes Gemini requests to fail before reaching the API.
+    if _uses_blocked_loopback_proxy():
+        http_options = types.HttpOptions(clientArgs={"trust_env": False})
+
+    return genai.Client(api_key=api_key, http_options=http_options)
 
 
-def _render_header() -> None:
-    st.markdown(
-        """
-        <div class="hero-card">
-            <h1>Smart Knowledge Navigator</h1>
-            <p>Upload a document, index it, and ask grounded questions with cited source chunks.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+@app.get("/")
+def index():
+    return render_template("index.html")
 
 
-def _render_sidebar_status() -> None:
-    if st.session_state["indexed_file"]:
-        st.markdown(
-            f"""
-            <div class="info-card">
-                <strong>Current file</strong><br>
-                {st.session_state["indexed_file"][0]}
-            </div>
-            <div class="info-card">
-                <strong>Chunks indexed</strong><br>
-                {len(st.session_state["chunks"])}
-            </div>
-            """,
-            unsafe_allow_html=True,
+@app.get("/index.css")
+def frontend_styles():
+    return send_from_directory(BASE_DIR, "index.css")
+
+
+@app.get("/index.js")
+def frontend_script():
+    return send_from_directory(BASE_DIR, "index.js")
+
+
+# ---------------- TEXT EXTRACTION ---------------- #
+
+def _html_to_text(content: bytes) -> str:
+    soup = BeautifulSoup(content, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    return soup.get_text(" ", strip=True)
+
+
+def extract_text(file) -> str:
+    file_name = file.filename.lower()
+
+    if file_name.endswith(".pdf"):
+        reader = PdfReader(file)
+        return " ".join(page.extract_text() or "" for page in reader.pages)
+
+    if file_name.endswith((".html", ".htm")):
+        return _html_to_text(file.read())
+
+    if file_name.endswith(".zip"):
+        with zipfile.ZipFile(file) as archive:
+            html_files = [
+                name for name in archive.namelist()
+                if name.lower().endswith((".html", ".htm"))
+            ]
+
+            if not html_files:
+                raise ValueError("ZIP file has no HTML files.")
+
+            parts = []
+            for html_file in html_files:
+                text = _html_to_text(archive.read(html_file))
+                if text.strip():
+                    parts.append(text.strip())
+
+        return "\n\n".join(parts)
+
+    raise ValueError("Unsupported file type.")
+
+
+# ---------------- CHUNKING ---------------- #
+
+def chunk_text(text, chunk_size=500):
+    overlap = 50
+
+    if chunk_size <= overlap:
+        raise ValueError("chunk_size must be greater than overlap.")
+
+    words = text.split()
+    step = chunk_size - overlap
+
+    chunks = []
+    for start in range(0, len(words), step):
+        chunk_words = words[start:start + chunk_size]
+        if not chunk_words:
+            continue
+
+        chunks.append({
+            "id": len(chunks) + 1,
+            "text": " ".join(chunk_words)
+        })
+
+        if start + chunk_size >= len(words):
+            break
+
+    return chunks
+
+
+# ---------------- VECTOR INDEX ---------------- #
+
+def build_index(chunks):
+    if not chunks:
+        raise ValueError("No text extracted.")
+
+    texts = [chunk["text"] for chunk in chunks]
+
+    vectorizer = TfidfVectorizer(stop_words="english")
+    matrix = vectorizer.fit_transform(texts)
+
+    return matrix, vectorizer
+
+
+# ---------------- RETRIEVAL ---------------- #
+
+def retrieve(query, index, vectorizer, chunks, top_k=5):
+    query_vector = vectorizer.transform([query])
+    similarities = cosine_similarity(query_vector, index)[0]
+
+    ranked_indices = similarities.argsort()[::-1]
+
+    return [
+        chunks[i]
+        for i in ranked_indices[:top_k]
+        if similarities[i] > 0
+    ]
+
+
+# ---------------- ANSWER GENERATION ---------------- #
+
+def answer(query, chunks):
+    _load_api_key()
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set.")
+
+    if not chunks:
+        raise ValueError("No relevant context found.")
+
+    client = _build_genai_client(api_key)
+
+    prompt_lines = [
+        "Answer the question using only the context below.",
+        "After each sentence cite sources like [1], [2].",
+        ""
+    ]
+
+    for i, chunk in enumerate(chunks, start=1):
+        prompt_lines.append(f"[{i}] {chunk['text']}")
+
+    prompt_lines.append("")
+    prompt_lines.append(f"Question: {query}")
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="\n".join(prompt_lines),
         )
-    else:
-        st.info("Upload a PDF, HTML file, or ZIP of HTML files to begin.")
+    except Exception as exc:
+        raise ValueError(f"Gemini request failed: {exc}") from exc
+
+    if not response.text:
+        raise ValueError("Empty response from model.")
+
+    return response.text.strip()
 
 
-def _render_empty_state() -> None:
-    st.markdown(
-        """
-        <div class="empty-state">
-            <strong>Ready when you are.</strong><br>
-            Add a file from the sidebar, wait for indexing to finish, then ask questions in the chat box below.
-            Supported files: PDF, HTML, HTM, ZIP.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# ---------------- API ROUTES ---------------- #
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    global VECTOR_INDEX, VECTORIZER, CHUNKS
+
+    file = request.files.get("file")
+
+    if not file:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    try:
+        text = extract_text(file)
+        CHUNKS = chunk_text(text)
+
+        VECTOR_INDEX, VECTORIZER = build_index(CHUNKS)
+
+        return jsonify({
+            "message": "File processed successfully",
+            "file_name": file.filename,
+            "chunks": len(CHUNKS)
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-st.set_page_config(page_title="Smart Knowledge Navigator", page_icon="📚", layout="wide")
-_load_api_key()
-_inject_styles()
+@app.route("/ask", methods=["POST"])
+def ask():
+    global VECTOR_INDEX, VECTORIZER, CHUNKS
 
-if "index" not in st.session_state:
-    st.session_state["index"] = None
-if "model" not in st.session_state:
-    st.session_state["model"] = None
-if "chunks" not in st.session_state:
-    st.session_state["chunks"] = []
-if "indexed" not in st.session_state:
-    st.session_state["indexed"] = False
-if "indexed_file" not in st.session_state:
-    st.session_state["indexed_file"] = None
-if "messages" not in st.session_state:
-    st.session_state["messages"] = []
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or data.get("question") or "").strip()
 
-_render_header()
+    if not query:
+        return jsonify({"error": "No query provided"}), 400
 
-with st.sidebar:
-    st.header("Knowledge Base")
-    uploaded_file = st.file_uploader(
-        "Upload a file",
-        type=["pdf", "html", "htm", "zip"],
-    )
+    if VECTOR_INDEX is None:
+        return jsonify({"error": "Upload a file first"}), 400
 
-    if uploaded_file is not None:
-        file_signature = (uploaded_file.name, uploaded_file.size)
+    try:
+        retrieved_chunks = retrieve(query, VECTOR_INDEX, VECTORIZER, CHUNKS)
+        response = answer(query, retrieved_chunks)
 
-        if st.session_state["indexed_file"] != file_signature:
-            try:
-                with st.spinner("Indexing file..."):
-                    text = extract_text(uploaded_file)
-                    chunks = chunk_text(text)
-                    index, model, indexed_chunks = build_index(chunks)
-            except Exception as exc:
-                st.session_state["index"] = None
-                st.session_state["model"] = None
-                st.session_state["chunks"] = []
-                st.session_state["indexed"] = False
-                st.session_state["indexed_file"] = None
-                _reset_chat()
-                st.error(f"Indexing failed: {exc}")
-            else:
-                st.session_state["index"] = index
-                st.session_state["model"] = model
-                st.session_state["chunks"] = indexed_chunks
-                st.session_state["indexed"] = True
-                st.session_state["indexed_file"] = file_signature
-                _reset_chat()
-                st.success("Indexing complete.")
-        elif st.session_state["indexed"]:
-            st.success("Indexing complete.")
+        return jsonify(
+            {
+                "answer": response,
+                "sources": retrieved_chunks,
+                "source_count": len(retrieved_chunks),
+            }
+        )
 
-    if st.button("Clear Chat", use_container_width=True):
-        _reset_chat()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    _render_sidebar_status()
 
-for message in st.session_state["messages"]:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if message["role"] == "assistant" and message.get("sources"):
-            st.markdown(
-                f"<div class='source-note'>Sources used: {len(message['sources'])}</div>",
-                unsafe_allow_html=True,
-            )
-        for index, chunk in enumerate(message.get("sources", []), start=1):
-            with st.expander(f"Source [{index}]"):
-                st.write(chunk["text"])
+# ---------------- RUN ---------------- #
 
-if not st.session_state["indexed"]:
-    _render_empty_state()
-    st.chat_message("assistant").markdown(
-        "Upload a file from the sidebar, and I will answer questions from that content."
-    )
-elif not st.session_state["messages"]:
-    st.chat_message("assistant").markdown(
-        "Your file is indexed. Ask a question like `Summarize this document`, `What are the key points?`, or `What evidence supports the main claim?`"
-    )
-
-prompt = st.chat_input(
-    "Ask a question about your uploaded file",
-    disabled=not st.session_state["indexed"],
-)
-
-if prompt:
-    st.session_state["messages"].append({"role": "user", "content": prompt})
-
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        try:
-            with st.spinner("Thinking..."):
-                retrieved_chunks = retrieve(
-                    prompt,
-                    st.session_state["index"],
-                    st.session_state["model"],
-                    st.session_state["chunks"],
-                )
-                answer_text = answer(prompt, retrieved_chunks)
-        except Exception as exc:
-            assistant_message = f"Question failed: {exc}"
-            st.error(assistant_message)
-            st.session_state["messages"].append(
-                {"role": "assistant", "content": assistant_message, "sources": []}
-            )
-        else:
-            st.markdown(answer_text)
-            st.markdown(
-                f"<div class='source-note'>Sources used: {len(retrieved_chunks)}</div>",
-                unsafe_allow_html=True,
-            )
-            for index, chunk in enumerate(retrieved_chunks, start=1):
-                with st.expander(f"Source [{index}]"):
-                    st.write(chunk["text"])
-
-            st.session_state["messages"].append(
-                {
-                    "role": "assistant",
-                    "content": answer_text,
-                    "sources": retrieved_chunks,
-                }
-            )
+if __name__ == "__main__":
+    _load_api_key()
+    app.run(debug=True)
