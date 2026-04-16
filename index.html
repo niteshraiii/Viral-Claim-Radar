@@ -44,23 +44,26 @@
                 <div class="workspace-header">
                     <div>
                         <p class="section-kicker">Knowledge workspace</p>
-                        <h2>Ask across PDFs and documents</h2>
+                        <h2>Ask across PDFs and HTML document sets</h2>
                     </div>
-                    <span class="status-pill">Live query flow</span>
+                    <span class="status-pill" id="statusPill">Waiting for upload</span>
                 </div>
 
                 <div class="workspace-grid">
                     <div class="panel upload-panel">
                         <div class="panel-header">
-                            <h3>1. Upload source file</h3>
-                            <p>Select a document to prepare it for question answering.</p>
+                            <div>
+                                <h3>1. Upload source file</h3>
+                                <p>Select a document to prepare it for question answering.</p>
+                            </div>
+                            <button id="uploadButton" type="button">Index File</button>
                         </div>
 
                         <label class="upload-dropzone" for="fileInput">
-                            <input type="file" id="fileInput" accept=".pdf,.doc,.docx,.txt">
+                            <input type="file" id="fileInput" accept=".pdf,.html,.htm,.zip">
                             <span class="upload-icon">+</span>
                             <span class="upload-title">Choose a document</span>
-                            <span class="upload-subtitle">PDF, DOC, DOCX, or TXT</span>
+                            <span class="upload-subtitle">PDF, HTML, HTM, or ZIP</span>
                         </label>
 
                         <div class="file-meta" id="fileMeta">No file selected yet.</div>
@@ -68,15 +71,17 @@
 
                     <div class="panel query-panel">
                         <div class="panel-header">
-                            <h3>2. Ask your question</h3>
-                            <p>Write a precise prompt to retrieve the most relevant answer.</p>
+                            <div>
+                                <h3>2. Ask your question</h3>
+                                <p>Write a precise prompt to retrieve the most relevant answer.</p>
+                            </div>
                         </div>
 
                         <label class="input-label" for="question">Question</label>
-                        <textarea id="question" placeholder="Example: Summarize the main risk factors and cite the relevant section."></textarea>
+                        <textarea id="question" placeholder="Example: Summarize the main risk factors and cite the relevant section." disabled></textarea>
 
                         <div class="action-row">
-                            <button id="askButton" type="button" onclick="askQuestion()">Ask Knowledge Base</button>
+                            <button id="askButton" type="button" disabled>Ask Knowledge Base</button>
                             <span class="action-hint">Best results come from focused, specific questions.</span>
                         </div>
                     </div>
@@ -84,17 +89,24 @@
 
                 <div class="panel response-panel">
                     <div class="panel-header">
-                        <h3>3. Review the answer</h3>
-                        <p>The model response and source reference will appear below.</p>
+                        <div>
+                            <h3>3. Review the answer</h3>
+                            <p>The model response and source references will appear below.</p>
+                        </div>
                     </div>
 
                     <div class="answer-card">
                         <div class="answer-label">Response</div>
-                        <p id="answer">Answer will be shown here...</p>
+                        <p id="answer">Answer will be shown here after your file is indexed and you ask a question.</p>
                     </div>
 
-                    <div class="ProvideAnswer helper-note" id="reply">
+                    <div class="helper-note" id="reply">
                         Upload a document and ask a question to begin.
+                    </div>
+
+                    <div class="sources-panel" id="sourcesPanel" hidden>
+                        <div class="answer-label">Source Chunks</div>
+                        <div id="sourcesList" class="sources-list"></div>
                     </div>
                 </div>
             </section>

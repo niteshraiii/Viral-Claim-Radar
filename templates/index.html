@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Smart Knowledge Navigator</title>
+    <title>Visual Knowledge Navigator</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('frontend_styles') }}">
+    <link rel="stylesheet" href="{{ url_for('frontend_styles', v=asset_version) }}">
 </head>
 <body>
     <div class="page-shell">
@@ -17,25 +17,26 @@
 
         <main class="app-frame">
             <section class="hero-panel">
-                <div class="eyebrow">Smart Knowledge Navigator</div>
-                <h1>Turn static files into an answer-ready knowledge workspace.</h1>
+                <div class="eyebrow">Visual Knowledge Navigator</div>
+                <h1>Turn charts, graphs, plans, and documents into an answer-ready visual workspace.</h1>
                 <p class="hero-copy">
-                    Upload your documents, ask focused questions, and get traceable responses in a cleaner,
-                    more engaging interface built for real product demos and internal tools.
+                    Upload pie charts, graphs, dashboards, floor plans, maps, or supporting documents, then ask
+                    for trends, comparisons, directions, or source visuals. The assistant can use extracted text
+                    and the image itself to explain what it sees with source-backed answers.
                 </p>
 
                 <div class="hero-stats">
                     <div class="stat-card">
-                        <span class="stat-value">Fast</span>
-                        <span class="stat-label">Question-to-answer flow</span>
+                        <span class="stat-value">Visual</span>
+                        <span class="stat-label">Chart and image reasoning</span>
                     </div>
                     <div class="stat-card">
-                        <span class="stat-value">Clear</span>
-                        <span class="stat-label">Readable response layout</span>
+                        <span class="stat-value">Analytical</span>
+                        <span class="stat-label">Trends, values, comparisons</span>
                     </div>
                     <div class="stat-card">
-                        <span class="stat-value">Ready</span>
-                        <span class="stat-label">Professional presentation</span>
+                        <span class="stat-value">Traceable</span>
+                        <span class="stat-label">Cited answers and returned visuals</span>
                     </div>
                 </div>
             </section>
@@ -44,7 +45,7 @@
                 <div class="workspace-header">
                     <div>
                         <p class="section-kicker">Knowledge workspace</p>
-                        <h2>Ask across PDFs and HTML document sets</h2>
+                        <h2>Ask across documents, charts, dashboards, maps, and plans</h2>
                     </div>
                     <span class="status-pill" id="statusPill">Waiting for upload</span>
                 </div>
@@ -53,18 +54,34 @@
                     <div class="panel upload-panel">
                         <div class="panel-header">
                             <div>
-                                <h3>1. Upload source file</h3>
-                                <p>Select a document to prepare it for question answering.</p>
+                                <p class="panel-kicker">Step 1</p>
+                                <h3>1. Upload source files</h3>
+                                <p>Select one or more charts, graphs, plans, maps, screenshots, or documents to prepare them together.</p>
                             </div>
-                            <button id="uploadButton" type="button">Index File</button>
+                            <button id="uploadButton" type="button">Index Files</button>
                         </div>
 
                         <label class="upload-dropzone" for="fileInput">
-                            <input type="file" id="fileInput" accept=".pdf,.html,.htm,.zip">
+                            <input type="file" id="fileInput" accept=".pdf,.html,.htm,.zip,.png,.jpg,.jpeg,.webp,.gif,.bmp" multiple>
                             <span class="upload-icon">+</span>
-                            <span class="upload-title">Choose a document</span>
-                            <span class="upload-subtitle">PDF, HTML, HTM, or ZIP</span>
+                            <span class="upload-title">Choose one or more visuals or documents</span>
+                            <span class="upload-subtitle">PDF, HTML, HTM, ZIP, PNG, JPG, JPEG, WEBP, GIF, or BMP</span>
                         </label>
+
+                        <div class="mode-card">
+                            <div class="mode-copy">
+                                <span class="mode-badge">Mode</span>
+                                <div>
+                                    <label class="mode-toggle" for="webSearchOnly">
+                                        <input type="checkbox" id="webSearchOnly">
+                                        <span>Web search only</span>
+                                    </label>
+                                    <p class="mode-toggle-copy">
+                                        When enabled, answers come from live web search only and uploaded files are ignored.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
 
                         <div class="file-meta" id="fileMeta">No file selected yet.</div>
                     </div>
@@ -72,17 +89,24 @@
                     <div class="panel query-panel">
                         <div class="panel-header">
                             <div>
+                                <p class="panel-kicker">Step 2</p>
                                 <h3>2. Ask your question</h3>
-                                <p>Write a precise prompt to retrieve the most relevant answer.</p>
+                                <p>Ask for chart insights, percentage breakdowns, trends, comparisons, directions, or the original visual.</p>
                             </div>
                         </div>
 
                         <label class="input-label" for="question">Question</label>
-                        <textarea id="question" placeholder="Example: Summarize the main risk factors and cite the relevant section." disabled></textarea>
+                        <textarea id="question" placeholder="Example: What does this pie chart show, and can you return the image?" disabled></textarea>
+
+                        <div class="prompt-strip" aria-label="Example prompts">
+                            <button class="prompt-chip" type="button" data-prompt="Summarize the chart and highlight the main trend.">Summarize chart</button>
+                            <button class="prompt-chip" type="button" data-prompt="What are the key comparisons or outliers in this graph?">Compare values</button>
+                            <button class="prompt-chip" type="button" data-prompt="Show me the original graph image.">Return image</button>
+                        </div>
 
                         <div class="action-row">
                             <button id="askButton" type="button" disabled>Ask Knowledge Base</button>
-                            <span class="action-hint">Best results come from focused, specific questions.</span>
+                            <span class="action-hint">Try prompts like "Summarize the chart" or "Show me the graph image."</span>
                         </div>
                     </div>
                 </div>
@@ -90,29 +114,41 @@
                 <div class="panel response-panel">
                     <div class="panel-header">
                         <div>
+                            <p class="panel-kicker">Step 3</p>
                             <h3>3. Review the answer</h3>
-                            <p>The model response and source references will appear below.</p>
+                            <p>The model response, cited sources, and any returned visuals will appear below.</p>
                         </div>
+                    </div>
+
+                    <div class="response-highlights">
+                        <div class="response-chip">Answers cite their sources</div>
+                        <div class="response-chip">Returned visuals open full-size</div>
+                        <div class="response-chip">Web search can run separately</div>
                     </div>
 
                     <div class="answer-card">
                         <div class="answer-label">Response</div>
-                        <p id="answer">Answer will be shown here after your file is indexed and you ask a question.</p>
+                        <p id="answer">Answer will be shown here after your files are indexed and you ask a question.</p>
                     </div>
 
                     <div class="helper-note" id="reply">
-                        Upload a document and ask a question to begin.
+                        Upload a chart, graph, image, plan, or document and ask a question to begin.
                     </div>
 
                     <div class="sources-panel" id="sourcesPanel" hidden>
-                        <div class="answer-label">Source Chunks</div>
+                        <div class="answer-label">Sources</div>
                         <div id="sourcesList" class="sources-list"></div>
+                    </div>
+
+                    <div class="sources-panel returned-visuals-panel" id="returnedVisualsPanel" hidden>
+                        <div class="answer-label">Returned Visuals</div>
+                        <div id="returnedVisualsList" class="returned-visuals-grid"></div>
                     </div>
                 </div>
             </section>
         </main>
     </div>
 
-    <script src="{{ url_for('frontend_script') }}"></script>
+    <script src="{{ url_for('frontend_script', v=asset_version) }}"></script>
 </body>
 </html>
